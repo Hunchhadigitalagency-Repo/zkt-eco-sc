@@ -4,7 +4,7 @@ import requests
 import logging
 import json
 from collections import defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # Logging configuration
 LOG_FILE = "attendance_logs.log"
@@ -17,8 +17,7 @@ logging.basicConfig(
 
 # Device connection details
 BASE_URL = "https://hunchha.hajirkhata.com"
-GET_DEVICE_DATA = f"{BASE_URL}/api/device/get-devices/all/"
-SERVER_ENDPOINT_TO_SEND_ATTENDANCE = f"{BASE_URL}/api/device/post-device-data"
+
 
 def get_device_data():
     """
@@ -27,7 +26,7 @@ def get_device_data():
     """
     try:
         logging.info("Fetching device data...")
-        response = requests.get(BASE_URL)
+        response = requests.get(f"{BASE_URL}/api/device/get-devices/all/")
         response.raise_for_status()
         
         # Assuming the API returns a JSON response with an array of device details
@@ -43,6 +42,7 @@ def get_device_data():
                 "port": device.get("port", 4370),  # Default port if not specified
                 "username": device.get("device_user_name", "admin"),  # Default username
                 "password": device.get("device_password", 0),  # Default password
+                "organization": device.get("organization")
             }
             device_list.append(device_info)
         
@@ -84,8 +84,15 @@ def formatted_attendance_data(attendance_data):
 
     # Loop through each record in the attendance data
     for record in attendance_data:
-        # Extract the date part from the timestamp
-        date_str = record["time"].split(" ")[0]  # YYYY-MM-DD
+        # Parse the datetime and reformat the time
+        original_time = datetime.strptime(record["time"], "%Y-%m-%d %H:%M:%S")  # Assuming input is "YYYY-MM-DD HH:MM:SS"
+        formatted_time = original_time.strftime("%Y-%m-%dT%H:%M:%S+05:45")  # Reformat time to include timezone offset
+        
+        # Update the record with the formatted time
+        record["time"] = formatted_time
+
+        # Extract the date part from the formatted time
+        date_str = formatted_time.split("T")[0]  # YYYY-MM-DD
 
         # Add the record to the date and user_id group
         formatted_data[date_str][record["user_id"]].append(record)
@@ -124,6 +131,24 @@ def formatted_attendance_data(attendance_data):
 
     return formatted_result
 
+def filter_data(records):
+    # Read the last sync date from the JSON file
+    with open("last_sync_date.json", "r") as f:
+        last_sync_data = json.load(f)
+    
+    # Parse the last sync date from ISO 8601 format, and convert to timezone-aware datetime
+    last_sync_date = datetime.fromisoformat(last_sync_data["last_sync_date"])
+    
+    # Get the current date and time, convert to the same timezone as last_sync_date
+    current_time = datetime.now(last_sync_date.tzinfo)
+    
+    # Filter records by comparing their `time` field
+    filtered_records = [
+        record for record in records
+        if last_sync_date <= datetime.strptime(record["time"], "%Y-%m-%d %H:%M:%S").replace(tzinfo=last_sync_date.tzinfo) <= current_time
+    ]
+    
+    return filtered_records
 
 def fetch_attendance_data(ip, port, password):
     """
@@ -141,7 +166,7 @@ def fetch_attendance_data(ip, port, password):
 
         users = conn.get_users()
         user_map = {user.user_id: user.name for user in users}
-        
+
         if attendance:
             logging.info(f"Attendance records fetched successfully from {ip}:{port}.")
             
@@ -162,8 +187,11 @@ def fetch_attendance_data(ip, port, password):
                     "status": record.status
                 })
 
+            # filter data from last sync date to current time
+            filtered_attendance_data = filter_data(attendance_data)
+
             # format the attendance_data into defined structure
-            formatted_data  = formatted_attendance_data(attendance_data)
+            formatted_data  = formatted_attendance_data(filtered_attendance_data)
 
             # Store the attendance data in a JSON file
             clear_and_store_attendance_data(formatted_data)
@@ -181,26 +209,30 @@ def fetch_attendance_data(ip, port, password):
             conn.disconnect()
         logging.info(f"Disconnected from the device at {ip}:{port}.")
 
-def sendDataToServer(organization_id,data):
+def sendDataToServer(organization_id, data):
     try:
         payload = {
             "organization_id": organization_id,
-            "data": data
+            "data": [data]
         }
-        response = requests.post("https://hunchha.hajirkhata.com/api/device/post-device-data", json=payload)
+        json_payload = json.dumps(payload)  # Serialize payload to JSON
+
+        headers = {"Content-Type": "application/json"}  # Explicitly set headers
+        response = requests.post(f"{BASE_URL}/api/device/post-device-data", data=json_payload, headers=headers)
+
+        # print(f"HTTP Status Code: {response.status_code}")
+        # print("Response Content:", response.text)
+
         response.raise_for_status()
-        logging.info("Attendance data sent to the server successfully.")
-        try:
-            response_data = response.json()
-            logging.info(f"Response from the server: {response_data}")
-        except json.JSONDecodeError:
-            logging.error("Failed to parse the response from the server.")
-    except Exception as e:
-        logging.error(f"Failed to send data to the server: {e}")
+        return response.json()  # Return parsed JSON response
+    except requests.exceptions.RequestException as e:
+        print(f"Request failed: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print("Error Response Content:", e.response.text)
 
 def sendLogFileDataToserver(ip_address):
-    server_endpoint = "https://hunchha.hajirkhata.com/api/log/log-entries/"
-    log_file_path = 'script.log'
+    server_endpoint = f"{BASE_URL}/api/log/log-entries/"
+    log_file_path = 'attendance_logs.log'
     # Read the log file
     try:
         with open(log_file_path, 'r') as file:
@@ -233,6 +265,61 @@ def sendLogFileDataToserver(ip_address):
     except IOError as e:
         logging.error(f"Error clearing log file: {str(e)}")
 
+def updateTheLastSyncDate():
+    # get the file last_sync_date.json and update the data {"last_sync_date": "2024-11-28T00:00:00+05:45"} to todays 00:00:00
+    with open("last_sync_date.json", "r") as f:
+        last_sync_data = json.load(f)
+    
+    # Parse the last sync date from ISO 8601 format, and convert to timezone-aware datetime
+    last_sync_date = datetime.fromisoformat(last_sync_data["last_sync_date"])
+    
+    # Get the current date and time, convert to the same timezone as last_sync_date
+    current_time = datetime.now(last_sync_date.tzinfo)
+    
+    # Update the last sync date to todays 00:00:00
+    last_sync_data["last_sync_date"] = current_time.strftime("%Y-%m-%dT00:00:00+05:45")
+    
+    # Write the updated data back to the file
+    with open("last_sync_date.json", "w") as f:
+        json.dump(last_sync_data, f)
+
+def clear_old_data_from_device(device_ip, device_port, password, timeout=5):
+    try:
+        # Establish connection to the ZKTeco device
+        zk = ZK(device_ip, port=device_port, password=password, timeout=timeout)
+        connection = zk.connect()
+        
+        # Get the current date and time
+        current_time = datetime.now()
+        
+        # Calculate the date 1 week ago
+        one_week_ago = current_time - timedelta(weeks=1)
+        
+        # Fetch all attendance logs from the device
+        attendance_logs = connection.get_attendance()
+        
+        # Filter out logs that are older than 1 week
+        old_logs = [
+            log for log in attendance_logs
+            if datetime.strptime(log['timestamp'], '%Y-%m-%d %H:%M:%S') < one_week_ago
+        ]
+        
+        if old_logs:
+            # Iterate through the old records and delete them
+            for log in old_logs:
+                log_id = log['id']  # Assuming each log has a unique 'id'
+                connection.delete_attendance(log_id)
+                logging.info(f"Deleted attendance log: {log_id} from the device.")
+            logging.info(f"Successfully cleared {len(old_logs)} old attendance records.")
+        else:
+            logging.info("No attendance records older than 1 week found.")
+        
+        # Close the connection
+        zk.disconnect()
+        
+    except Exception as e:
+        logging.error(f"An error occurred while clearing old data: {e}")
+
 if __name__ == "__main__":
     # Fetch data for all devices
     logging.info("Starting attendance fetch script.")
@@ -247,11 +334,13 @@ if __name__ == "__main__":
                         port=device["port"],
                         password=device["password"],
                     )
-
-                    if fetched_data:
+                    if fetched_data is not None:
                         logging.info(f"Attendance records fetched successfully from {device['ip']}.")
                         sendDataToServer(device["organization"],fetched_data)
                         sendLogFileDataToserver(device["ip"])
+                        logging.info(f"All data hase been sent to the server.")
+                        updateTheLastSyncDate()
+                        # clear_old_data_from_device(device["ip"], device["port"], device["password"])
 
                 except Exception as e:
                     logging.error(f"Failed to fetch attendance data for device at {device['ip']}: {e}")
