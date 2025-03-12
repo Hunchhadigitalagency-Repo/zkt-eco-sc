@@ -282,43 +282,7 @@ def updateTheLastSyncDate():
     # Write the updated data back to the file
     with open("last_sync_date.json", "w") as f:
         json.dump(last_sync_data, f)
-
-def clear_old_data_from_device(device_ip, device_port, password, timeout=5):
-    try:
-        # Establish connection to the ZKTeco device
-        zk = ZK(device_ip, port=device_port, password=password, timeout=timeout)
-        connection = zk.connect()
         
-        # Get the current date and time
-        current_time = datetime.now()
-        
-        # Calculate the date 1 week ago
-        one_week_ago = current_time - timedelta(weeks=1)
-        
-        # Fetch all attendance logs from the device
-        attendance_logs = connection.get_attendance()
-        
-        # Filter out logs that are older than 1 week
-        old_logs = [
-            log for log in attendance_logs
-            if datetime.strptime(log['timestamp'], '%Y-%m-%d %H:%M:%S') < one_week_ago
-        ]
-        
-        if old_logs:
-            # Iterate through the old records and delete them
-            for log in old_logs:
-                log_id = log['id']  # Assuming each log has a unique 'id'
-                connection.delete_attendance(log_id)
-                logging.info(f"Deleted attendance log: {log_id} from the device.")
-            logging.info(f"Successfully cleared {len(old_logs)} old attendance records.")
-        else:
-            logging.info("No attendance records older than 1 week found.")
-        
-        # Close the connection
-        zk.disconnect()
-        
-    except Exception as e:
-        logging.error(f"An error occurred while clearing old data: {e}")
 
 if __name__ == "__main__":
     # Fetch data for all devices
@@ -339,11 +303,12 @@ if __name__ == "__main__":
                         sendDataToServer(device["organization"],fetched_data)
                         sendLogFileDataToserver(device["ip"])
                         logging.info(f"All data hase been sent to the server.")
-                        updateTheLastSyncDate()
-                        # clear_old_data_from_device(device["ip"], device["port"], device["password"])
 
                 except Exception as e:
                     logging.error(f"Failed to fetch attendance data for device at {device['ip']}: {e}")
+            
+            
+            updateTheLastSyncDate()
             logging.info("Waiting for 60 seconds before the next fetch for all devices...")
             time.sleep(60)  # Wait for 60 seconds before fetching data again
     else:
